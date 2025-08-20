@@ -1,0 +1,195 @@
+Awesome 🙌 Let’s make it fail gracefully: if a query comes back empty, you’ll see a neat table saying “No results found” instead of an awkward blank.
+
+Here’s the final upgrade:
+
+from rdflib import Graph, Literal, Namespace, URIRef
+from rdflib.namespace import RDF, RDFS, DC
+from IPython.display import display
+import pandas as pd
+
+# --- Styling Helpers ---
+
+def make_clickable(val):
+    """Convert URIs into clickable links, showing only the last part as text."""
+    if isinstance(val, str) and (val.startswith("http://") or val.startswith("https://")):
+        short_label = val.split('#')[-1].split('/')[-1]
+        return f'<a href="{val}" target="_blank">{short_label}</a>'
+    return val
+
+def style_dataframe(df: pd.DataFrame, max_width: str = "300px"):
+    """Apply pretty styling to DataFrame with clickable links."""
+    def highlight_na(val):
+        return 'background-color: #f0f0f0; color: #666;' if val in ["N/A", "Unknown Type", ""] else ''
+
+    def highlight_message(row):
+        if "Message" in row and pd.notnull(row["Message"]):
+            return ['background-color: #fff3cd; color: #856404; font-weight: bold;'] * len(row)
+        return [''] * len(row)
+
+    df = df.applymap(make_clickable)
+
+    styled = (df.style
+                .applymap(highlight_na)
+                .apply(highlight_message, axis=1)
+                .set_table_styles([
+                    {"selector": "th", "props": [("font-weight", "bold"),
+                                                 ("background-color", "#e6f2ff"),
+                                                 ("text-align", "left"),
+                                                 ("max-width", max_width),
+                                                 ("word-wrap", "break-word")]},
+                    {"selector": "td", "props": [("max-width", max_width),
+                                                 ("word-wrap", "break-word"),
+                                                 ("white-space", "pre-wrap"),
+                                                 ("vertical-align", "top")]}
+                ])
+                .set_properties(**{"border": "1px solid #ccc",
+                                   "padding": "4px",
+                                   "text-align": "left"})
+                .format(escape="html"))
+    return styled
+
+
+# --- Knowledge Graph Search ---
+
+def search_knowledge_graph(graph, query_text=None, query_type='stage_or_example'):
+    """
+    Searches the knowledge graph based on user input and returns a styled DataFrame.
+    Automatically shows 'No results found' if nothing is returned.
+    """
+    results = []
+    query_text = query_text.lower() if query_text else None
+
+    if query_type == 'stage_or_example' and query_text:
+        sparql_query = f"""
+        SELECT ?entity ?label ?type ?description
+        WHERE {{
+          {{
+            ?entity rdfs:label ?label .
+            FILTER (CONTAINS(LCASE(STR(?label)), "{query_text}")) .
+            OPTIONAL {{ ?entity rdf:type ?type . }}
+            OPTIONAL {{ ?entity dc:description ?description . }}
+          }} UNION {{
+            ?entity dc:description ?description .
+            FILTER (CONTAINS(LCASE(STR(?description)), "{query_text}")) .
+            OPTIONAL {{ ?entity rdfs:label ?label . }}
+            OPTIONAL {{ ?entity rdf:type ?type . }}
+          }}
+        }}
+        LIMIT 50
+        """
+        query_results = graph.query(sparql_query)
+        for row in query_results:
+            results.append({
+                "Entity": str(row.entity),
+                "Label": str(row.label) if row.label else "N/A",
+                "Type": str(row.type).split('#')[-1] if row.type else "Unknown Type",
+                "Description": str(row.description) if row.description else "N/A"
+            })
+
+    elif query_type == 'examples_for_stage' and query_text:
+        find_stage_query = f"""
+        SELECT ?stageUri
+        WHERE {{
+            ?stageUri rdfs:label ?stageLabel .
+            FILTER (LCASE(STR(?stageLabel)) = "{query_text}") .
+        }}
+        LIMIT 1
+        """
+        stage_uri_result = list(graph.query(find_stage_query))
+
+        if stage_uri_result:
+            stage_uri = stage_uri_result[0].stageUri
+            sparql_query = f"""
+            SELECT ?example ?name ?description
+            WHERE {{
+              ?example pipeline:isInstanceOf <{stage_uri}> ;
+                       rdfs:label ?name ;
+                       dc:description ?description .
+            }}
+            LIMIT 50
+            """
+            query_results = graph.query(sparql_query)
+            for row in query_results:
+                results.append({
+                    "Example": str(row.example),
+                    "Name": str(row.name),
+                    "Description": str(row.description)
+                })
+        else:
+            results = [{"Message": f"No stage or phase found with the label: {query_text}"}]
+
+    elif query_type == 'stage_for_example' and query_text:
+        find_example_query = f"""
+        SELECT ?exampleUri
+        WHERE {{
+            ?exampleUri rdfs:label ?exampleLabel .
+            FILTER (LCASE(STR(?exampleLabel)) = "{query_text}") .
+        }}
+        LIMIT 1
+        """
+        example_uri_result = list(graph.query(find_example_query))
+
+        if example_uri_result:
+            example_uri = example_uri_result[0].exampleUri
+            sparql_query = f"""
+            SELECT ?stage ?stageLabel ?stageType
+            WHERE {{
+              <{example_uri}> pipeline:isInstanceOf ?stage .
+              ?stage rdfs:label ?stageLabel .
+              OPTIONAL {{ ?stage rdf:type ?stageType . }}
+            }}
+            """
+            query_results = graph.query(sparql_query)
+            for row in query_results:
+                results.append({
+                    "Stage": str(row.stage),
+                    "StageLabel": str(row.stageLabel),
+                    "StageType": str(row.stageType).split('#')[-1] if row.stageType else "Unknown Type"
+                })
+        else:
+            results = [{"Message": f"No example found with the label: {query_text}"}]
+
+    elif query_type == 'search_description' and query_text:
+        sparql_query = f"""
+        SELECT ?entity ?label ?type ?description
+        WHERE {{
+          ?entity dc:description ?description .
+          FILTER (CONTAINS(LCASE(STR(?description)), "{query_text}")) .
+          OPTIONAL {{ ?entity rdfs:label ?label . }}
+          OPTIONAL {{ ?entity rdf:type ?type . }}
+        }}
+        LIMIT 50
+        """
+        query_results = graph.query(sparql_query)
+        for row in query_results:
+            results.append({
+                "Entity": str(row.entity),
+                "Label": str(row.label) if row.label else "N/A",
+                "Type": str(row.type).split('#')[-1] if row.type else "Unknown Type",
+                "Description": str(row.description) if row.description else "N/A"
+            })
+
+    else:
+        results = [{"Message": "Invalid query type or missing query text."}]
+
+    # If nothing found, add friendly message
+    if not results:
+        results = [{"Message": f"No results found for '{query_text}'"}]
+
+    df = pd.DataFrame(results)
+    return style_dataframe(df)
+
+
+⸻
+
+✅ Now behavior is:
+	•	If there are matches → you get a clickable styled table.
+	•	If no matches → you get a yellow-highlighted row:
+
+Message
+No results found for ‘foobar’
+
+
+⸻
+
+Do you also want me to log the executed SPARQL query (in a collapsed view) so you can debug why nothing matched, or should I keep the output clean?
